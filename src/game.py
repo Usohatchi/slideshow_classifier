@@ -143,6 +143,51 @@ def render(state, reward=None, done=None):
 
     print('-----------------------')
 
+
+def preprocess(_state):
+    # Get data
+    matrix = _state[0]
+    vector_1 = _state[1]
+    vector_2 = _state[2]
+
+    # Reshape data
+    matrix = matrix.reshape(1, len(matrix), len(matrix[0]), 1)
+    vectors = np.concatenate((vector_1, vector_2), axis=None)
+    vectors = vectors.reshape(1, len(vectors))
+    
+    return matrix, vectors
+
+def play(model, photos):
+    while True:
+        print("==========STARTING ROLLOUT==========")
+        sample_photos = sample(photos)
+
+        # init game
+        _state = init_index(sample_photos)
+        _matrix_state, _vector_state = preprocess(_state)
+        _done = False
+        total_reward = 0
+        count = 0
+
+        while not _done and count < SAMPLE_SIZE * 2:
+            _predict = model.predict([_matrix_state, _vector_state], batch_size=1)[0]
+            _action = np.argmax(_predict)
+            print("==========")
+            print("Action being taken: {}".format(_action))
+            print("State:")
+            print(_state[0])
+            print(_state[1])
+            print(_state[2])
+            print("==========")
+            _state, _reward, _done  = step_index(_state, _action)
+            _matrix_state, _vector_state = preprocess(_state)
+            total_reward += _reward
+            count += 1
+        print("Total reward: {}".format(total_reward))
+        input()
+        
+
+
 if __name__ == '__main__':
 
     slides = [{0,1,2},{3,4,5},{5,0}]

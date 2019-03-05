@@ -20,21 +20,20 @@ import numpy as np
 import random
 
 import tensorflow as tf
-from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.models import Sequential, Model, load_model
 from tensorflow.keras import callbacks
 from tensorflow.keras import backend as K
 from tensorflow import keras
+from sklearn.cluser import KMeans
 
-from src.game import init, step, step_index, init_index
+from src.game import init, step, step_index, init_index, preprocess, play
 
 from ortools.constraint_solver import pywrapcp
 from ortools.constraint_solver import routing_enums_pb2
 
-def read_file():
+def read_file(file_name):
     # Read file
-    #with open("c_memorable_moments.txt") as f:
-    #with open("a_example.txt") as f:
-    with open("b_lovely_landscapes.txt") as f:
+    with open(filename) as f:
         photos = f.readlines()
         photos = [x.strip() for x in photos]
 
@@ -42,31 +41,48 @@ def read_file():
     photos.pop(0)
     photos = [x.split() for x in photos]
 
-    # List of only the tags for each photo
+    # List of only the tags
     tags = [x[2:] for x in photos]
     tags = [item for sublist in tags for item in sublist]
 
     enc_photos = []
     photos_as_tags = [x[2:] for x in photos]
 
-    # Get percentage distribution of letters
-    letters_dist = Counter([letter for photo in tags for tag in photo for letter in tag])
-    total_letters = sum(letters_count.values())
-    for key, value in letters_count.items():
-        letters_dist[key] = value / total_letters
-
-    #print(photos_as_tags)
-
     for el in photos_as_tags:
         m = map(lambda x: tags.index(x), el)
         enc_photos.append(set(m))
     enc_photos = np.array(enc_photos)
 
-    return enc_photos, letters_dist
+    return enc_photos
 
-def sample(photos):
-    sample = np.random.choice(photos, SAMPLE_SIZE)
-    return sample
+def build_sample_generator(enc_photos, embedding_path, n_clusters):
+    embedding_matrix = BytesIO(file_io.read_file_to_string(embedding_path, binary_mode=True))
+    embedding_matrix = np.load(embedding_matrix)
+
+    kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(embedding_matrix)
+
+    def sample_generator():
+        while (True):
+                # pick cluster from probablity distribution of clusters (likely to pick higher density clusters)
+            cluster_index = np.random.choice(kmeans.labels_, 1)
+            cluster_indices = np.where(cluster_index == set(kmeans.labels_))[0]
+            cluster_size = len(cluster_indices)
+            # randomly sample from cluster if cluster is bigger than SAMPLE_SIZE
+            if cluster_size >= SAMPLE_SIZE:
+                sample_indices = np.random.choice(cluster_indices, SAMPLE_SIZE)
+                sample_ = enc_photos[sample_indices]
+                adj_matrix = init_index(sample_)[0]
+                yield adj_matrix
+            # sample entire cluster and fill remainder with random samples
+            elif cluster_size > SAMPLE_SIZE * .8:
+                sample_indices = cluster_indices
+                remainder = SAMPLE_SIZE - cluster_size
+                sample_indices.append(np.random.choice(cluster_indices, remainder))
+                sample_ = enc_photos[sample_indices]
+                adj_matrix = init_index(sample_)[0]
+                yield adj_matrix
+
+    return sample_generator()
 
 def build_model():
     # Build input layers
@@ -101,48 +117,6 @@ def build_model():
     model.compile(loss=custom_loss, optimizer=rms, metrics=['accuracy'])
 
     return model
-
-def preprocess(_state):
-    # Get data
-    matrix = _state[0]
-    vector_1 = _state[1]
-    vector_2 = _state[2]
-
-    # Reshape data
-    matrix = matrix.reshape(1, len(matrix), len(matrix[0]), 1)
-    vectors = np.concatenate((vector_1, vector_2), axis=None)
-    vectors = vectors.reshape(1, len(vectors))
-    
-    return matrix, vectors
-
-def play(model, photos):
-    while True:
-        print("==========STARTING ROLLOUT==========")
-        sample_photos = sample(photos)
-
-        # init game
-        _state = init_index(sample_photos)
-        _matrix_state, _vector_state = preprocess(_state)
-        _done = False
-        total_reward = 0
-        count = 0
-
-        while not _done and count < SAMPLE_SIZE * 2:
-            _predict = model.predict([_matrix_state, _vector_state], batch_size=1)[0]
-            _action = np.argmax(_predict)
-            print("==========")
-            print("Action being taken: {}".format(_action))
-            print("State:")
-            print(_state[0])
-            print(_state[1])
-            print(_state[2])
-            print("==========")
-            _state, _reward, _done  = step_index(_state, _action)
-            _matrix_state, _vector_state = preprocess(_state)
-            total_reward += _reward
-            count += 1
-        print("Total reward: {}".format(total_reward))
-        input()
         
 ### FROM GOOGLE ###
 def create_distance_callback(dist_matrix, max_reward):
@@ -196,127 +170,120 @@ def gen_solution(matrix, tsp_size):
 
     return ret
 
-def gen_frames(frames, photos, verbose=False):
-    while True:
-        # Play games until we have the amount of frames we want
-        epoch_memory = []
-        while len(epoch_memory) < frames:
-            # Generate new game
-            sample_photos = sample(photos)
+def build_frames_generator(frames, photos_generator, verbose=False):
 
-            # init game
-            _state = init_index(sample_photos)
-            _matrix_state, _vector_state = preprocess(_state)
-            game_memory = []
-            _done = False
+    def frames_generator():
+        while True:
+            # Play games until we have the amount of frames we want
+            epoch_memory = []
+            epoch_reward = []
+            while len(epoch_memory) < frames:
+                # Generate new game
+                sample_photos = next(photos_generator)
 
-            # While there are no rewards in our sample, reroll
-            while (np.amax(_matrix_state) == 0):
-                sample_photos = sample(photos)
+                # init game
                 _state = init_index(sample_photos)
                 _matrix_state, _vector_state = preprocess(_state)
-                    
+                game_memory = []
+                _done = False
 
-            # init solution
-            _solved = gen_solution(_matrix_state, SAMPLE_SIZE)
-            if verbose: print(_solved)
+                # While there are no rewards in our sample, reroll
+                while (np.amax(_matrix_state) == 0):
+                    sample_photos = sample(photos)
+                    _state = init_index(sample_photos)
+                    _matrix_state, _vector_state = preprocess(_state)
+                        
+                # init solution
+                _solved = gen_solution(_matrix_state, SAMPLE_SIZE)
+                if verbose: print(_solved)
 
-            # Take solution actions
-            for index in _solved:
-                if verbose:
-                    print(_state[0])
-                    print(_state[1])
-                    print(_state[2])
-                _action = index
-                _state, _reward, _done  = step_index(_state, _action)
-                if verbose:
-                    print("Action being taken: {}".format(_action))
-                    print("Reward: {}".format(_reward))
-                    print("Done? {}".format(_done))
-                game_memory.append((_matrix_state, _vector_state, _reward, _action))
-                _matrix_state, _vector_state = preprocess(_state)
+                # Take solution actions
+                for index in _solved:
+                    if verbose:
+                        print(_state[0])
+                        print(_state[1])
+                        print(_state[2])
+                    _action = index
+                    _state, _reward, _done  = step_index(_state, _action)
+                    if verbose:
+                        print("Action being taken: {}".format(_action))
+                        print("Reward: {}".format(_reward))
+                        print("Done? {}".format(_done))
+                    game_memory.append((_matrix_state, _vector_state, _reward, _action))
+                    _matrix_state, _vector_state = preprocess(_state)
 
-            # Once the game has finished, process the rewards then save to epoch_memory
-            _m_s, _v_s, _rewards, _labels = zip(*game_memory)
-            PERIOD_REWARD.append(sum(_rewards))
-            epoch_memory.extend(zip(_m_s, _v_s, _labels))
+                # Once the game has finished, process the rewards then save to epoch_memory
+                _m_s, _v_s, _rewards, _l = zip(*game_memory)
+                epoch_reward.append(sum(_rewards))
+                epoch_memory.extend(zip(_m_s, _v_s, _l))
 
-        # Shuffle and return frames
-        epoch_memory = [tuple(ex) for ex in np.array(epoch_memory)[np.random.permutation(len(epoch_memory))]]
-        _matrixs, _vectors, _labels = zip(*epoch_memory)
+            # Shuffle and return frames
+            epoch_memory = [tuple(ex) for ex in np.array(epoch_memory)[np.random.permutation(len(epoch_memory))]]
+            _matrixs, _vectors, _labels = zip(*epoch_memory)
 
-        # Cut returning arrays down to frames length to give a costant expected shape for tensors
-        _matrixs = np.array(_matrixs).reshape(len(_matrixs), SAMPLE_SIZE, SAMPLE_SIZE, 1)
-        _vectors = np.array(_vectors)[:frames].reshape(ROLLOUT_SIZE, SAMPLE_SIZE * 2)
-        _labels = np.squeeze(np.array(_labels))
+            # Cut returning arrays down to frames length to give a costant expected shape for tensors
+            _matrixs = np.array(_matrixs).reshape(len(_matrixs), SAMPLE_SIZE, SAMPLE_SIZE, 1)
+            _vectors = np.array(_vectors)[:frames].reshape(ROLLOUT_SIZE, SAMPLE_SIZE * 2)
+            _labels = np.squeeze(np.array(_labels))
 
-        yield ({"input_matrix": _matrixs[:frames], "input_vectors": _vectors}, _labels[:frames])
+            print(sum(epoch_reward) / len(epoch_reward))
 
-def build_dataset():
-    memory = deque([], maxlen=MEMORY_SIZE)
-    def next():
-        for data in memory:
-            yield data
+            yield ({"input_matrix": _matrixs[:frames], "input_vectors": _vectors}, _labels[:frames])
 
+    return frames_generator()
+
+def build_dataset(gen):
     dataset = tf.data.Dataset.from_generator(
-        next,
+        gen,
         output_types=({"input_matrix": tf.float32, "input_vectors": tf.float32}, tf.int32),
         output_shapes=({"input_matrix": (ROLLOUT_SIZE, SAMPLE_SIZE, SAMPLE_SIZE, 1), "input_vectors": (ROLLOUT_SIZE, SAMPLE_SIZE * 2)}, (ROLLOUT_SIZE))
         )
     dataset.batch(BATCH_SIZE).repeat()
-    return memory, dataset
+    return dataset
 
 def main(args):
-    global BATCH_SIZE, LEARNING_RATE, PERIOD_REWARD, GAMMA, SAMPLE_SIZE
-    print('args: {}'.format(args))
+    # Init global variables
+    global BATCH_SIZE, LEARNING_RATE, SAMPLE_SIZE, ROLLOUT_SIZE
 
     BATCH_SIZE = args.batch_size
+    ROLLOUT_SIZE = args.rollout_size
+    SAMPLE_SIZE = args.sample_size
     LEARNING_RATE = args.learning_rate
 
-    GAMMA = args.gamma
-
-    PERIOD_REWARD = []
-    SAMPLE_SIZE = args.sample_size
-
     # Build model
-    model = build_model()
+    if args.restore == None:
+        model = build_model()
+    else:
+        model = load_model(args.restore)
 
     # Read photos
-    photos = read_file()
+    photos = read_file(args.file_name)
 
-    # Build callbacks
+    # Build sample generator
+    sample_generator = build_sample_generator(photos, args.image_embedding, args.cluster_size)
+
+    # Build callbacks)
     tbCallBack = callbacks.TensorBoard(log_dir=args.output_dir, histogram_freq=0, write_graph=True, write_images=True)
-    filepath="new_model/checkpoint"
-    saveCallBack = callbacks.ModelCheckpoint(filepath.format(args.output_dir), monitor='val_loss', period=5)
+    filepath="{}/{epoch:02d}.hdf5".format(args.output_dir)
+    saveCallBack = callbacks.ModelCheckpoint(filepath, monitor='val_loss', period=args.save_checkpoint_steps)
 
     # Build generator and dataset
-    memory, dataset = build_dataset()
-    gen = gen_frames(ROLLOUT_SIZE, model, photos)
+    frame_generator = build_frame_generator(ROLLOUT_SIZE, sample_generator)
+    dataset = build_dataset(frame_generator)
 
     # Train!
-    for e in range(args.n_epoch):
-        print("Generating data...")
-        memory.append(next(gen))
-
-        PERIOD_REWARD = []
-        print("Training...")
-        model_train.fit(
-            dataset,
-            batch_size=ROLLOUT_SIZE,
-            initial_epoch=e,
-            epochs=(e + 1),
-            steps_per_epoch=1,
-            verbose=1,
-            callbacks=[tbCallBack, saveCallBack])
-
-        #print(model_train.train_on_batch(dataset))
-        #print("All rewards: {}".format(PERIOD_REWARD))
-        print("Average epoch reward: {}".format(sum(PERIOD_REWARD) / len(PERIOD_REWARD)))
+    model_train.fit(
+        dataset,
+        batch_size=ROLLOUT_SIZE,
+        epochs=args.n_epoch,
+        steps_per_epoch=1,
+        verbose=1,
+        callbacks=[tbCallBack, saveCallBack])
 
     play(model, photos)
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser('pizza cutter trainer')
+    parser = argparse.ArgumentParser('slideshow classifier')
     parser.add_argument(
         '--n-epoch',
         type=int,
@@ -338,9 +305,25 @@ if __name__ == '__main__':
         type=str,
         default='/tmp/pizza_output')
     parser.add_argument(
+        '--file-name',
+        type=str,
+        default='data/a_example.txt')
+    parser.add_argument(
+        '--image-embedding',
+        type=str,
+        default='data/image_matrix.npy')
+    parser.add_argument(
+        '--cluster-size',
+        type=int,
+        default=20)
+    parser.add_argument(
+        '--rollout-size',
+        type=int,
+        default=10000)
+    parser.add_argument(
         '--restore',
         default=False,
-        action='store_true')
+        action=None)
     parser.add_argument(
         '--play',
         default=False,
@@ -357,14 +340,6 @@ if __name__ == '__main__':
         '--learning-rate',
         type=float,
         default=5e-4)
-    parser.add_argument(
-        '--gamma',
-        type=float,
-        default=0.9)
-    parser.add_argument(
-        '--epsilon',
-        type=float,
-        default=1e-2)
 
     args = parser.parse_args()
 
