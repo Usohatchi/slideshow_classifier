@@ -89,8 +89,7 @@ if __name__ == '__main__':
 		print(sample_size)
 	print("Sampled Interest: {:.3f}\tRandom Interest: {:.3f}".format(sum(avg_interest), sum(random_interest)))
 
-	sample_size = 20
-	def sample_generator():
+	def sample_generator(sample_size):
 		while (True):
 			# pick cluster from probablity distribution of clusters (likely to pick higher density clusters)
 			cluster_index = np.random.choice(kmeans.labels_, 1)
@@ -114,7 +113,8 @@ if __name__ == '__main__':
 				return adj_matrix
 		return None
 	
-	adj_mat = sample_generator()
+	sample_size = 20
+	adj_mat = sample_generator(sample_size)
 	print(adj_mat)
 	score = np.sum(adj_mat)
 	print(score)
