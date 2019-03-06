@@ -157,10 +157,10 @@ def preprocess(_state):
     
     return matrix, vectors
 
-def play(model, photos):
+def play(model, gen, sample_size):
     while True:
         print("==========STARTING ROLLOUT==========")
-        sample_photos = sample(photos)
+        sample_photos = next(gen)
 
         # init game
         _state = init_index(sample_photos)
@@ -169,7 +169,7 @@ def play(model, photos):
         total_reward = 0
         count = 0
 
-        while not _done and count < SAMPLE_SIZE * 2:
+        while not _done and count < sample_size * 2:
             _predict = model.predict([_matrix_state, _vector_state], batch_size=1)[0]
             _action = np.argmax(_predict)
             print("==========")

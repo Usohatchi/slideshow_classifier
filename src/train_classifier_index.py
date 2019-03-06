@@ -14,6 +14,8 @@
 
 import argparse
 import os
+from tensorflow.python.lib.io import file_io
+from io import BytesIO
 
 from collections import deque, Counter
 import numpy as np
@@ -24,7 +26,7 @@ from tensorflow.keras.models import Sequential, Model, load_model
 from tensorflow.keras import callbacks
 from tensorflow.keras import backend as K
 from tensorflow import keras
-from sklearn.cluser import KMeans
+from sklearn.cluster import KMeans
 
 from src.game import init, step, step_index, init_index, preprocess, play
 
@@ -33,7 +35,7 @@ from ortools.constraint_solver import routing_enums_pb2
 
 def read_file(file_name):
     # Read file
-    with open(filename) as f:
+    with open(file_name) as f:
         photos = f.readlines()
         photos = [x.strip() for x in photos]
 
@@ -55,32 +57,32 @@ def read_file(file_name):
 
     return enc_photos
 
-def build_sample_generator(enc_photos, embedding_path, n_clusters):
+def build_sample_generator(enc_photos, embedding_path, n_clusters, random):
     embedding_matrix = BytesIO(file_io.read_file_to_string(embedding_path, binary_mode=True))
     embedding_matrix = np.load(embedding_matrix)
 
     kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(embedding_matrix)
 
     def sample_generator():
-        while (True):
-                # pick cluster from probablity distribution of clusters (likely to pick higher density clusters)
+        while True:
+            if random:
+                yield np.random.choise(enc_photos, SAMPLE_SIZE)
+            # pick cluster from probablity distribution of clusters (likely to pick higher density clusters)
             cluster_index = np.random.choice(kmeans.labels_, 1)
-            cluster_indices = np.where(cluster_index == set(kmeans.labels_))[0]
+            cluster_indices = np.where(cluster_index == kmeans.labels_)[0]
             cluster_size = len(cluster_indices)
             # randomly sample from cluster if cluster is bigger than SAMPLE_SIZE
             if cluster_size >= SAMPLE_SIZE:
                 sample_indices = np.random.choice(cluster_indices, SAMPLE_SIZE)
                 sample_ = enc_photos[sample_indices]
-                adj_matrix = init_index(sample_)[0]
-                yield adj_matrix
+                yield sample_
             # sample entire cluster and fill remainder with random samples
             elif cluster_size > SAMPLE_SIZE * .8:
                 sample_indices = cluster_indices
                 remainder = SAMPLE_SIZE - cluster_size
-                sample_indices.append(np.random.choice(cluster_indices, remainder))
+                sample_indices = np.append(sample_indices, np.random.choice(np.where(cluster_index != kmeans.labels_)[0], remainder))
                 sample_ = enc_photos[sample_indices]
-                adj_matrix = init_index(sample_)[0]
-                yield adj_matrix
+                yield sample_
 
     return sample_generator()
 
@@ -107,14 +109,12 @@ def build_model():
     # Build optimizer
     rms = keras.optimizers.RMSprop(lr=LEARNING_RATE)
 
-    # Define custom loss function
-    def custom_loss(y_true, y_pred):
-        cross_entropy = K.sparse_categorical_crossentropy(y_true, y_pred)
-        return K.mean(cross_entropy, keepdims=True)
-
     # Build and compile training model
-    model = Model(inputs=[input_matrix, input_vector], outputs=out)
-    model.compile(loss=custom_loss, optimizer=rms, metrics=['accuracy'])
+    model = Model(inputs=[input_matrix, input_vectors], outputs=out)
+    model.compile(
+        loss=tf.keras.losses.sparse_categorical_crossentropy,
+        optimizer=rms,
+        metrics=['accuracy'])
 
     return model
         
@@ -189,7 +189,7 @@ def build_frames_generator(frames, photos_generator, verbose=False):
 
                 # While there are no rewards in our sample, reroll
                 while (np.amax(_matrix_state) == 0):
-                    sample_photos = sample(photos)
+                    sample_photos = next(photos_generator)
                     _state = init_index(sample_photos)
                     _matrix_state, _vector_state = preprocess(_state)
                         
@@ -260,19 +260,19 @@ def main(args):
     photos = read_file(args.file_name)
 
     # Build sample generator
-    sample_generator = build_sample_generator(photos, args.image_embedding, args.cluster_size)
+    sample_generator = build_sample_generator(photos, args.image_embedding, args.cluster_size, args.random)
 
     # Build callbacks)
     tbCallBack = callbacks.TensorBoard(log_dir=args.output_dir, histogram_freq=0, write_graph=True, write_images=True)
-    filepath="{}/{epoch:02d}.hdf5".format(args.output_dir)
+    filepath = args.output_dir + "/{epoch:02d}.hdf5"
     saveCallBack = callbacks.ModelCheckpoint(filepath, monitor='val_loss', period=args.save_checkpoint_steps)
 
     # Build generator and dataset
-    frame_generator = build_frame_generator(ROLLOUT_SIZE, sample_generator)
+    frame_generator = lambda: build_frames_generator(ROLLOUT_SIZE, sample_generator)
     dataset = build_dataset(frame_generator)
 
     # Train!
-    model_train.fit(
+    model.fit(
         dataset,
         batch_size=ROLLOUT_SIZE,
         epochs=args.n_epoch,
@@ -280,7 +280,7 @@ def main(args):
         verbose=1,
         callbacks=[tbCallBack, saveCallBack])
 
-    play(model, photos)
+    play(model, sample_generator, SAMPLE_SIZE)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('slideshow classifier')
@@ -293,13 +293,9 @@ if __name__ == '__main__':
         type=int,
         default=3000)
     parser.add_argument(
-        '--period',
-        type=int,
-        default=5)
-    parser.add_argument(
         '--output-dir',
         type=str,
-        default='data')
+        default='log')
     parser.add_argument(
         '--job-dir',
         type=str,
@@ -319,11 +315,11 @@ if __name__ == '__main__':
     parser.add_argument(
         '--rollout-size',
         type=int,
-        default=10000)
+        default=5000)
     parser.add_argument(
         '--restore',
-        default=False,
-        action=None)
+        type=str,
+        default=None)
     parser.add_argument(
         '--play',
         default=False,
@@ -331,15 +327,19 @@ if __name__ == '__main__':
     parser.add_argument(
         '--save-checkpoint-steps',
         type=int,
-        default=1)
+        default=5)
     parser.add_argument(
         '--sample-size',
         type=int,
-        default=4)
+        default=10)
     parser.add_argument(
         '--learning-rate',
         type=float,
         default=5e-4)
+    parser.add_argument(
+        '--random',
+        default=False,
+        action='store_true')
 
     args = parser.parse_args()
 
