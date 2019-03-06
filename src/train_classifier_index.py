@@ -73,14 +73,14 @@ def build_sample_generator(enc_photos, embedding_path, n_clusters, random):
             cluster_size = len(cluster_indices)
             # randomly sample from cluster if cluster is bigger than SAMPLE_SIZE
             if cluster_size >= SAMPLE_SIZE:
-                sample_indices = np.random.choice(cluster_indices, SAMPLE_SIZE)
+                sample_indices = np.random.choice(cluster_indices, SAMPLE_SIZE, replace=False)
                 sample_ = enc_photos[sample_indices]
                 yield sample_
             # sample entire cluster and fill remainder with random samples
             elif cluster_size > SAMPLE_SIZE * .8:
                 sample_indices = cluster_indices
                 remainder = SAMPLE_SIZE - cluster_size
-                sample_indices = np.append(sample_indices, np.random.choice(np.where(cluster_index != kmeans.labels_)[0], remainder))
+                sample_indices = np.append(sample_indices, np.random.choice(np.where(cluster_index != kmeans.labels_)[0], remainder, replace=True))
                 sample_ = enc_photos[sample_indices]
                 yield sample_
 
