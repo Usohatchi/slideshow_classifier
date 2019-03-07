@@ -93,8 +93,7 @@ def build_model():
 
     # Conv2d layers
     conv1 = keras.layers.Conv2D(10, kernel_size=(1, SAMPLE_SIZE), activation='relu')(input_matrix)
-    conv2 = keras.layers.Conv2D(10, kernel_size=(SAMPLE_SIZE, 1), activation='relu')(conv1)
-    flatten = keras.layers.Flatten()(conv2)
+    flatten = keras.layers.Flatten()(conv1)
 
     # Combine layers
     combine = keras.layers.concatenate([flatten, input_vectors])

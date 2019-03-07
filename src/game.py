@@ -175,7 +175,7 @@ def play(model, gen, sample_size):
             print("==========")
             print("Action being taken: {}".format(_action))
             print("State:")
-            print(_state[0])
+            [print(l) for l in _state[0].tolist()]
             print(_state[1])
             print(_state[2])
             print("==========")
