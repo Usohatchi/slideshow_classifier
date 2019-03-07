@@ -28,7 +28,7 @@ from tensorflow.keras import backend as K
 from tensorflow import keras
 from sklearn.cluster import KMeans
 
-from src.game import init, step, step_index, init_index, preprocess, play
+from src.game import step_index, init_index, preprocess, play
 
 from ortools.constraint_solver import pywrapcp
 from ortools.constraint_solver import routing_enums_pb2
@@ -88,18 +88,14 @@ def build_sample_generator(enc_photos, embedding_path, n_clusters, random):
 
 def build_model():
     # Build input layers
-    input_matrix = keras.layers.Input(shape=[SAMPLE_SIZE, SAMPLE_SIZE, 1], name="input_matrix")
-    input_vectors = keras.layers.Input(shape=[SAMPLE_SIZE * 2], name="input_vectors")
+    input_matrix = keras.layers.Input(shape=[SAMPLE_SIZE, SAMPLE_SIZE, 3], name="input_matrix")
 
     # Conv2d layers
     conv1 = keras.layers.Conv2D(10, kernel_size=(1, SAMPLE_SIZE), activation='relu', padding="same")(input_matrix)
     flatten = keras.layers.Flatten()(conv1)
 
-    # Combine layers
-    combine = keras.layers.concatenate([flatten, input_vectors])
-
     # Build dense layers
-    x = keras.layers.Dense(units=1000, activation='relu', kernel_initializer='glorot_uniform', name="layer_1", use_bias=False)(combine)
+    x = keras.layers.Dense(units=1000, activation='relu', kernel_initializer='glorot_uniform', name="layer_1", use_bias=False)(flatten)
     x = keras.layers.Dense(units=1000 , activation='relu', kernel_initializer='glorot_uniform', name="layer_2", use_bias=False)(x)
 
     # Build output layers
@@ -109,7 +105,7 @@ def build_model():
     rms = keras.optimizers.RMSprop(lr=LEARNING_RATE)
 
     # Build and compile training model
-    model = Model(inputs=[input_matrix, input_vectors], outputs=out)
+    model = Model(inputs=[input_matrix], outputs=out)
     model.compile(
         loss=tf.keras.losses.sparse_categorical_crossentropy,
         optimizer=rms,
@@ -126,9 +122,9 @@ def create_distance_callback(dist_matrix, max_reward):
 
   return distance_callback
 
-def gen_solution(matrix, tsp_size):
-    # Make callbacks
-    matrix = np.squeeze(matrix)
+def gen_solution(_matrix_state, tsp_size):
+    matrix = np.squeeze(_matrix_state)
+    matrix = matrix[:, :, 0]
 
     # Consider distance as (max_reward - reward)
     # so the program prioritizes large rewards
@@ -151,7 +147,8 @@ def gen_solution(matrix, tsp_size):
         solution.append(node)
         node = assignment.Value(routing.NextVar(node))
 
-    # Remove "useless" moves
+    # Our final solution should only contain useful moves
+    # Google's solution has a pattern in the way they make "useless" moves, so removing them combats unbalanced datasets
     prev = solution[0]
     ret = []
     for index in range(1, len(solution) - 1):
@@ -182,15 +179,15 @@ def build_frames_generator(frames, photos_generator, verbose=False):
 
                 # init game
                 _state = init_index(sample_photos)
-                _matrix_state, _vector_state = preprocess(_state)
+                _matrix_state = preprocess(_state)
                 game_memory = []
                 _done = False
 
                 # While there are no rewards in our sample, reroll
-                while (np.amax(_matrix_state) == 0):
+                while (np.amax(_matrix_state[:, :, :, 0]) == 0):
                     sample_photos = next(photos_generator)
                     _state = init_index(sample_photos)
-                    _matrix_state, _vector_state = preprocess(_state)
+                    _matrix_state = preprocess(_state)
                         
                 # init solution
                 _solved = gen_solution(_matrix_state, SAMPLE_SIZE)
@@ -198,44 +195,33 @@ def build_frames_generator(frames, photos_generator, verbose=False):
 
                 # Take solution actions
                 for index in _solved:
-                    if verbose:
-                        print(_state[0])
-                        print(_state[1])
-                        print(_state[2])
                     _action = index
                     _state, _reward, _done  = step_index(_state, _action)
-                    if verbose:
-                        print("Action being taken: {}".format(_action))
-                        print("Reward: {}".format(_reward))
-                        print("Done? {}".format(_done))
-                    game_memory.append((_matrix_state, _vector_state, _reward, _action))
-                    _matrix_state, _vector_state = preprocess(_state)
+                    game_memory.append((_matrix_state,  _reward, _action))
+                    _matrix_state  = preprocess(_state)
 
-                # Once the game has finished, process the rewards then save to epoch_memory
-                _m_s, _v_s, _rewards, _l = zip(*game_memory)
+                # Once the game has finished, save the rewards then save state and label to epoch_memory
+                _m_s, _rewards, _l = zip(*game_memory)
                 epoch_reward.append(sum(_rewards))
-                epoch_memory.extend(zip(_m_s, _v_s, _l))
+                epoch_memory.extend(zip(_m_s, _l))
 
             # Shuffle and return frames
             epoch_memory = [tuple(ex) for ex in np.array(epoch_memory)[np.random.permutation(len(epoch_memory))]]
-            _matrixs, _vectors, _labels = zip(*epoch_memory)
+            _matrixs, _labels = zip(*epoch_memory)
 
-            # Cut returning arrays down to frames length to give a costant expected shape for tensors
-            _matrixs = np.array(_matrixs).reshape(len(_matrixs), SAMPLE_SIZE, SAMPLE_SIZE, 1)
-            _vectors = np.array(_vectors)[:frames].reshape(ROLLOUT_SIZE, SAMPLE_SIZE * 2)
+            _matrixs = np.array(_matrixs).reshape(len(_matrixs), SAMPLE_SIZE, SAMPLE_SIZE, 3)
             _labels = np.squeeze(np.array(_labels))
 
-            print(sum(epoch_reward) / len(epoch_reward))
-
-            yield ({"input_matrix": _matrixs[:frames], "input_vectors": _vectors}, _labels[:frames])
+            # Cut returning arrays down to frames length to give a costant expected shape for tensors
+            yield (_matrixs[:frames], _labels[:frames])
 
     return frames_generator()
 
 def build_dataset(gen):
     dataset = tf.data.Dataset.from_generator(
         gen,
-        output_types=({"input_matrix": tf.float32, "input_vectors": tf.float32}, tf.int32),
-        output_shapes=({"input_matrix": (ROLLOUT_SIZE, SAMPLE_SIZE, SAMPLE_SIZE, 1), "input_vectors": (ROLLOUT_SIZE, SAMPLE_SIZE * 2)}, (ROLLOUT_SIZE))
+        output_types=(tf.float32, tf.int32),
+        output_shapes=((ROLLOUT_SIZE, SAMPLE_SIZE, SAMPLE_SIZE, 3), (ROLLOUT_SIZE))
         )
     dataset.batch(BATCH_SIZE).repeat()
     return dataset
